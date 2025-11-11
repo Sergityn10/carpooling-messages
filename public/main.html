@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat en vivo</title>
+    <script type="module">
+        import {io} from 'https://cdn.socket.io/4.8.1/socket.io.esm.min.js'
+        const socket = io({
+            auth: {
+                token: localStorage.getItem('token'),
+                serverOffset: 0,
+                username: "Sergityn"
+            }
+        });
+        
+        const form = document.querySelector('form');
+        const input = document.querySelector('#input');
+        const send = document.querySelector('#send');
+        const join = document.querySelector('#join');
+        const receiver = document.getElementById('username');
+        const messages = document.getElementById('messages');
+        join.addEventListener("click", () => {
+            socket.emit("join_chat", receiver.value.trim());
+        })
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            if(input.value.trim() !== ''){
+                let data = {
+                    message: input.value,
+                    send_to: receiver.value.trim()
+                }
+                socket.emit('chat_message', data);
+                input.value = '';
+            }
+        });
+        socket.on("join_chat", (data) => {
+            console.log(data);
+        })
+
+        socket.on('chat_message', (data) => {
+            const item = `<li>${data.send_by}: ${data.message}</li>`;
+            messages.insertAdjacentHTML('beforeend', item);
+            socket.auth.serverOffset = data.serverOffset;
+            window.scrollTo(0, document.getElementById('messages').scrollHeight);
+        });
+    </script>
+    <style>
+    * {
+        box-sizing: border-box;
+    }
+    :root{
+        --primary-color: #2563eb;
+        --secondary-color: #1e40af;
+        --tertiary-color: #1e3a8a;
+        color-scheme: light dark;
+    }
+        body {
+            display: grid;
+            place-content: center;
+            grid-template-rows: 1fr;
+            padding: 36px;
+            height: 100vh;
+        }
+        main{
+            height: 100%;
+        }
+        #chat{
+            height: 100%;
+            width: 500px;
+            border: 1px solid #ccc; 
+            border-radius: 10px;
+            overflow: auto;
+            position: relative;
+            background-color: white;
+            button{
+                color-scheme: auto;
+            }
+            form{
+                position: absolute;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                width: 100%;
+                display: flex;
+                gap: 10px;
+                padding: 10px;
+            #input{
+                flex: 1;
+                padding: 10px;
+                border: none;
+                border-radius: 999999px;
+                outline: none;
+            }
+            #input:focus{
+                outline: none;
+            }
+            #send{
+                background: #09f;
+                color: #fff;
+                border: none;
+                margin: 4px;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+            #send:hover{
+                background: #06b6d4;
+            }
+        }
+        }
+        #messages{
+            color: black;
+            list-style-type: none;
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow-y: auto;
+        }
+        #messages>li{
+            padding: 10px;
+            border-bottom: 1px solid #ccc;
+        }
+        #messages>li:nth-child(odd){
+            background-color: #ccc;
+        }
+        #messages>li:last-child{
+            border-bottom: none;
+        }
+    </style>
+</head>
+<body>
+    <main>  
+        <h1>Chat en vivo</h1>
+        <input type="text" id="username" placeholder="Nombre de usuario">
+        <button id="join">Unirse a la sala</button>
+        <section id="chat">
+            <ul id="messages">
+            
+            </ul>
+
+            <form action="">
+                <input type="text" name="message" id="input"
+                placeholder="Escribe un mensaje"
+                autocomplete="off"
+                required/>
+                <button type="submit" id="send">Enviar</button>
+            </form>
+            
+        </section>
+    </main>
+</body>
+</html>
