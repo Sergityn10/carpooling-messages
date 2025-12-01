@@ -36,6 +36,9 @@ await db.execute(`
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 `)
+await db.execute(`
+CREATE TABLE IF NOT EXISTS pre_register (city TEXT NOT NULL, email TEXT NOT NULL PRIMARY KEY);
+`)
 
 
 //MIDDLEWARES
