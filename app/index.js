@@ -74,6 +74,7 @@ io.on("connection", async (socket) => {
             }
         }
     });
+    
 
     socket.on("join_chat", async (data) => {
         let nameRoom = utilsSockets.createNameChatRooms(socket.handshake.auth.username, data);
