@@ -2,7 +2,10 @@ import dotenv from "dotenv";
 dotenv.config();
 const USUARIOS_URL = process.env.USUARIOS_URL;
 async function authenticate(req, res, next) {
-    const token = req.cookies.access_token;
+    const authHeader = req.headers?.authorization;
+    const bearerToken = typeof authHeader === "string" ? authHeader.match(/^Bearer\s+(.+)$/i)?.[1] : undefined;
+    const cookieToken = req.cookies?.access_token;
+    const token = bearerToken || cookieToken;
     if (!token) {
         return res.status(401).send({status: "Error", message: "No se proporcionó un token de acceso"});
     }
@@ -17,7 +20,8 @@ async function authenticate(req, res, next) {
         
         // 🔑 AÑADIR HEADERS: Aquí es donde incluyes el header 'Cookie' manualmente
         headers: {
-            'Cookie': cookieHeaderValue
+            'Cookie': cookieHeaderValue,
+            'Authorization': `Bearer ${token}`
         }
         
     })

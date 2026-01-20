@@ -17,12 +17,12 @@ const app = express();
 const port = process.env.PORT?? 4003;
 //Creamos el servidor http
 const server = createServer(app);
-
+let frontend_origin= process.env.FRONTEND_ORIGIN?? "http://localhost:5173";
 //Creamos el servidor socket.io
 const io = new Server(server, {
     maxDisconnectionDelay: 5000,
     cors: {
-        origin: ["http://localhost:5173", "http://192.168.0.36:5173"],
+        origin: [frontend_origin],
         methods: ["GET", "POST"],
     },
 });
