@@ -21,6 +21,9 @@ let frontend_origin= process.env.FRONTEND_ORIGIN?? "http://localhost:5173";
 //Creamos el servidor socket.io
 const io = new Server(server, {
     maxDisconnectionDelay: 5000,
+    connectionStateRecovery: {
+        maxDisconnectionDuration: 2 * 60 * 1000,
+    },
     cors: {
         origin: [frontend_origin, "https://carpooling-webapp-ten.vercel.app"],
         methods: ["GET", "POST"],
@@ -65,22 +68,16 @@ app.use(cors({
     credentials: true // Permite el uso de cookies
 }))
 
-let users = {};
 io.on("connection", async (socket) => {
     console.log("Un cliente se ha conectado");
+    if (socket.handshake.auth?.username) {
+        socket.join(`user:${socket.handshake.auth.username}`);
+    }
     socket.on('setUserId', (username) => {
-    // Esto es crucial para saber a qué socket enviar la notificación
-    users[username] = socket.id;
-    console.log(`Usuario ${username} mapeado a socket ${socket.id}`);
-  });
+        if (username) socket.join(`user:${username}`);
+    });
     socket.on("disconnect", () => {
         console.log("Un cliente se ha desconectado");
-        for (const username in users) {
-            if (users[username] === socket.id) {
-                delete users[username];
-                break;
-            }
-        }
     });
     
 
@@ -93,13 +90,22 @@ io.on("connection", async (socket) => {
         socket.emit("join_chat", nameRoom);
 
                 try {
-        const totalMessages = await db.execute({
-            sql: "SELECT * FROM messages WHERE id > ? AND (send_to = ? AND send_by = ? OR send_to = ? AND send_by = ?) ORDER BY id ASC", //agregar la seccion para recuperar mensajes que me han enviado.
-            args: [socket.handshake.auth.serverOffset, data, socket.handshake.auth.username, socket.handshake.auth.username, data]
-        })
+        const serverOffset = Number(socket.handshake.auth?.serverOffset ?? 0);
+        const sqlBase = "((send_to = ? AND send_by = ?) OR (send_to = ? AND send_by = ?))";
+        const argsBase = [data, socket.handshake.auth.username, socket.handshake.auth.username, data];
 
+        const totalMessages = serverOffset > 0
+            ? await db.execute({
+                sql: `SELECT id, message, send_to, send_by, created_at FROM messages WHERE id > ? AND ${sqlBase} ORDER BY id ASC`,
+                args: [serverOffset, ...argsBase]
+            })
+            : await db.execute({
+                sql: `SELECT id, message, send_to, send_by, created_at FROM messages WHERE ${sqlBase} ORDER BY id DESC LIMIT 50`,
+                args: argsBase
+            })
 
         const arrayTotal = [...totalMessages.rows];
+        if (serverOffset === 0) arrayTotal.reverse();
         //Ordenar por la hora de creacion
         arrayTotal.forEach((row) => {
         let sendData = {
@@ -126,7 +132,7 @@ io.on("connection", async (socket) => {
     //     socket.emit("leave_chat", "Hasta luego");
     // })
 
-    socket.on("chat_message", async (data) => {
+    socket.on("chat_message", async (data, ack) => {
     let result;
     const send_by = socket.handshake.auth.username;
     let message = data.message;
@@ -138,6 +144,10 @@ io.on("connection", async (socket) => {
         })
     } catch (error) {
         console.log(error)
+        if (typeof ack === "function") {
+            ack({ status: "error", message: "No se pudo guardar el mensaje" });
+        }
+        socket.emit("chat_error", { message: "No se pudo guardar el mensaje" });
         return
     }
     let sendData = {
@@ -148,19 +158,20 @@ io.on("connection", async (socket) => {
         created_at: new Date().toISOString()
     }
 
+    const room = utilsSockets.createNameChatRooms(send_by, send_to);
+    socket.join(room);
+
     socket.emit("chat_message", sendData);
-    socket.to(data.room).emit("chat_message", sendData);
+    socket.to(room).emit("chat_message", sendData);
 
-    const receiverSocketId = users[send_to];
-
-    if (receiverSocketId) {
-      // Usa .to(socketId) para enviar a un socket específico.
-      io.to(receiverSocketId).emit('receiveNotification', {
+    io.to(`user:${send_to}`).emit('receiveNotification', {
         sender: send_by,
         chatId: send_to,
         content: message
-      });
-      console.log(`Notificación enviada a usuario ${send_to}`);
+    });
+
+    if (typeof ack === "function") {
+        ack({ status: "ok", serverOffset: sendData.serverOffset });
     }
     
     });
