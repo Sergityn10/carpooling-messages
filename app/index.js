@@ -41,10 +41,19 @@ await db.execute(`
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         message TEXT NOT NULL,
+        send_by TEXT NOT NULL,
+        send_to TEXT NOT NULL,
         readed TINYINT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 `)
+
+try { await db.execute("ALTER TABLE messages ADD COLUMN send_by TEXT"); } catch {}
+try { await db.execute("ALTER TABLE messages ADD COLUMN send_to TEXT"); } catch {}
+try { await db.execute("ALTER TABLE messages ADD COLUMN readed TINYINT DEFAULT 0"); } catch {}
+
+try { await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages (send_to, send_by, id)"); } catch {}
+try { await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages (send_to, readed, id)"); } catch {}
 await db.execute(`
 CREATE TABLE IF NOT EXISTS pre_register (city TEXT NOT NULL, email TEXT NOT NULL PRIMARY KEY);
 `)
@@ -72,6 +81,35 @@ io.on("connection", async (socket) => {
     console.log("Un cliente se ha conectado");
     if (socket.handshake.auth?.username) {
         socket.join(`user:${socket.handshake.auth.username}`);
+        try {
+            const unreadLastBySender = await db.execute({
+                sql: `
+                    SELECT m.id, m.send_by, m.send_to, m.message, m.created_at
+                    FROM messages m
+                    JOIN (
+                        SELECT send_by, MAX(id) AS max_id
+                        FROM messages
+                        WHERE send_to = ? AND readed = 0
+                        GROUP BY send_by
+                    ) t ON m.id = t.max_id
+                    ORDER BY m.id DESC
+                    LIMIT 20
+                `,
+                args: [socket.handshake.auth.username]
+            });
+
+            unreadLastBySender.rows.forEach((row) => {
+                socket.emit('receiveNotification', {
+                    sender: row.send_by,
+                    chatId: row.send_by,
+                    content: row.message,
+                    pending: true,
+                    serverOffset: row.id
+                });
+            })
+        } catch (error) {
+            console.log(error)
+        }
     }
     socket.on('setUserId', (username) => {
         if (username) socket.join(`user:${username}`);
@@ -117,6 +155,11 @@ io.on("connection", async (socket) => {
         }
                 socket.emit("chat_message", sendData);
             })
+
+        await db.execute({
+            sql: "UPDATE messages SET readed = 1 WHERE send_to = ? AND send_by = ? AND readed = 0",
+            args: [socket.handshake.auth.username, data]
+        })
             
         } catch (error) {
             console.log(error)
@@ -139,7 +182,7 @@ io.on("connection", async (socket) => {
     let send_to = data.send_to;
     try {
         result = await db.execute({
-            sql: "INSERT INTO messages (message, send_by, send_to, created_at) VALUES (?, ?, ?, ?)",
+            sql: "INSERT INTO messages (message, send_by, send_to, readed, created_at) VALUES (?, ?, ?, 0, ?)",
             args: [message, send_by, send_to, new Date().toISOString()]
         })
     } catch (error) {
