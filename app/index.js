@@ -26,6 +26,11 @@ const io = new Server(server, {
         methods: ["GET", "POST"],
     },
 });
+app.use(cors({
+    origin: [frontend_origin ], // Cambia esto a la URL de tu frontend
+    methods: "GET,POST,PUT,PATCH,DELETE",
+    credentials: true // Permite el uso de cookies
+}))
 
 //BASE DE DATOS
 
