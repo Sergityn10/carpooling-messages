@@ -17,12 +17,12 @@ const app = express();
 const port = process.env.PORT?? 4003;
 //Creamos el servidor http
 const server = createServer(app);
-
+let frontend_origin= process.env.FRONTEND_ORIGIN?? "http://localhost:5173";
 //Creamos el servidor socket.io
 const io = new Server(server, {
     maxDisconnectionDelay: 5000,
     cors: {
-        origin: ["http://localhost:5173", "http://192.168.0.36:5173"],
+        origin: [frontend_origin],
         methods: ["GET", "POST"],
     },
 });
@@ -33,6 +33,7 @@ await db.execute(`
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         message TEXT NOT NULL,
+        readed TINYINT DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
 `)
@@ -59,11 +60,24 @@ app.use(cors({
     credentials: true // Permite el uso de cookies
 }))
 
+let users = {};
 io.on("connection", async (socket) => {
     console.log("Un cliente se ha conectado");
+    socket.on('setUserId', (username) => {
+    // Esto es crucial para saber a qué socket enviar la notificación
+    users[username] = socket.id;
+    console.log(`Usuario ${username} mapeado a socket ${socket.id}`);
+  });
     socket.on("disconnect", () => {
         console.log("Un cliente se ha desconectado");
+        for (const username in users) {
+            if (users[username] === socket.id) {
+                delete users[username];
+                break;
+            }
+        }
     });
+    
 
     socket.on("join_chat", async (data) => {
         let nameRoom = utilsSockets.createNameChatRooms(socket.handshake.auth.username, data);
@@ -131,6 +145,18 @@ io.on("connection", async (socket) => {
 
     socket.emit("chat_message", sendData);
     socket.to(data.room).emit("chat_message", sendData);
+
+    const receiverSocketId = users[send_to];
+
+    if (receiverSocketId) {
+      // Usa .to(socketId) para enviar a un socket específico.
+      io.to(receiverSocketId).emit('receiveNotification', {
+        sender: send_by,
+        chatId: send_to,
+        content: message
+      });
+      console.log(`Notificación enviada a usuario ${send_to}`);
+    }
     
     });
 
