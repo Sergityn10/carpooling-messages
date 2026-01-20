@@ -22,7 +22,7 @@ let frontend_origin= process.env.FRONTEND_ORIGIN?? "http://localhost:5173";
 const io = new Server(server, {
     maxDisconnectionDelay: 5000,
     cors: {
-        origin: [frontend_origin],
+        origin: [frontend_origin, "https://carpooling-webapp-ten.vercel.app"],
         methods: ["GET", "POST"],
     },
 });
