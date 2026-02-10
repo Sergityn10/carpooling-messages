@@ -11,6 +11,7 @@ import { utilsAuthentication as authWebSocket } from "./controllers/authWebSocke
 import { utilsSockets } from "../utils/sockets.js";
 import { utilsAuthentication as auth } from "./controllers/auth.js";
 import { chatsController } from "./controllers/chats.js";
+import { methods as decrypMethods } from "../utils/crypto.js";
 dotenv.config();
 
 const __dirname = process.cwd();
@@ -32,8 +33,7 @@ const io = new Server(server, {
 });
 
 function getUserKeyFromUser(user) {
-  const raw =
-    user?.id ?? user?.user_id ?? user?.userId ?? user?.username ?? user?.email;
+  const raw = user?.id ?? user?.user_id ?? user?.userId ?? user?.email;
   if (raw === undefined || raw === null) return null;
   return String(raw);
 }
@@ -41,14 +41,14 @@ function getUserKeyFromUser(user) {
 async function authenticateSocketIfPossible(socket) {
   const token = socket.handshake.auth?.token;
   if (!token) {
-    const fallback = socket.handshake.auth?.username;
+    const fallback = socket.handshake.auth?.id;
     if (fallback) socket.userKey = String(fallback);
     return;
   }
 
   const usuariosUrl = process.env.USUARIOS_URL;
   if (!usuariosUrl) {
-    const fallback = socket.handshake.auth?.username;
+    const fallback = socket.handshake.auth?.id;
     if (fallback) socket.userKey = String(fallback);
     return;
   }
@@ -63,7 +63,7 @@ async function authenticateSocketIfPossible(socket) {
   });
 
   if (!response.ok) {
-    const fallback = socket.handshake.auth?.username;
+    const fallback = socket.handshake.auth?.id;
     if (fallback) socket.userKey = String(fallback);
     return;
   }
@@ -73,7 +73,7 @@ async function authenticateSocketIfPossible(socket) {
   const userKey = getUserKeyFromUser(socket.user);
   if (userKey) {
     socket.userKey = userKey;
-    socket.handshake.auth.username = userKey;
+    socket.handshake.auth.id = userKey;
   }
 }
 
@@ -96,12 +96,38 @@ app.use(
 //BASE DE DATOS
 
 await db.execute(`
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NULL,
+        img_perfil TEXT,
+        name TEXT,
+        phone TEXT,
+        fecha_nacimiento TEXT NULL,
+        dni TEXT NULL UNIQUE,
+        genero TEXT NULL CHECK (genero IN ('Masculino','Femenino','Otro')),
+        stripe_account TEXT,
+        stripe_customer_account TEXT,
+        ciudad TEXT NULL,
+        provincia TEXT NULL,
+        codigo_postal TEXT NULL,
+        direccion TEXT NULL,
+        onboarding_ended INTEGER NOT NULL DEFAULT 0,
+        about_me TEXT,
+        auth_method TEXT CHECK (auth_method IN ('password', 'google', 'other')) NOT NULL DEFAULT 'password',
+        google_id TEXT NULL,
+        created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
+        updated_at TEXT DEFAULT (CURRENT_TIMESTAMP)
+    );
+`);
+
+await db.execute(`
     CREATE TABLE IF NOT EXISTS chats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         is_group INTEGER DEFAULT 0,
         name TEXT,
         trip_id INTEGER,
-        admin_id TEXT,
+        admin_id INTEGER,
         last_message_content TEXT,
         last_message_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -333,9 +359,8 @@ app.use(
 );
 
 io.on("connection", async (socket) => {
-  console.log("Un cliente se ha conectado");
   const socketUserKey =
-    socket.userKey ?? String(socket.handshake.auth?.username ?? "");
+    socket.userKey ?? String(socket.handshake.auth?.id ?? "");
   if (socketUserKey) {
     socket.join(`user:${socketUserKey}`);
     try {
@@ -367,24 +392,19 @@ io.on("connection", async (socket) => {
           serverOffset: row.id,
         });
       });
-    } catch (error) {
-      console.log(error);
-    }
+    } catch (error) {}
   }
-  socket.on("setUserId", (username) => {
-    if (username) socket.join(`user:${username}`);
+  socket.on("setUserId", (id) => {
+    if (id) socket.join(`user:${id}`);
   });
-  socket.on("disconnect", () => {
-    console.log("Un cliente se ha desconectado");
-  });
+  socket.on("disconnect", () => {});
 
   async function handleJoinGroup(
     chatIdRaw,
     serverOffsetRaw,
     legacyAlsoEmitJoinChat,
   ) {
-    const userKey =
-      socket.userKey ?? String(socket.handshake.auth?.username ?? "");
+    const userKey = socket.userKey ?? String(socket.handshake.auth?.id ?? "");
     if (!userKey) return;
 
     const chatId = Number(chatIdRaw);
@@ -409,8 +429,37 @@ io.on("connection", async (socket) => {
 
     const room = `chat:${chatId}`;
     socket.join(room);
-    socket.emit("join_group", room);
-    if (legacyAlsoEmitJoinChat) socket.emit("join_chat", room);
+
+    let otherUser = null;
+    try {
+      const chatInfo = await db.execute({
+        sql: "SELECT is_group FROM chats WHERE id = ?",
+        args: [chatId],
+      });
+      const isGroup = chatInfo.rows?.[0]?.is_group === 1;
+
+      // if (!isGroup) {
+      //   const otherParticipant = await db.execute({
+      //     sql: "SELECT user_id FROM chat_participants WHERE chat_id = ? AND user_id <> ? LIMIT 1",
+      //     args: [chatId, userKey],
+      //   });
+      //   const otherUserId = otherParticipant.rows?.[0]?.user_id;
+
+      //   if (otherUserId) {
+      // const userRes = await db.execute({
+      //   sql: "SELECT name FROM users WHERE id = ?",
+      //   args: [otherUserId],
+      // });
+      //     otherUser = decrypMethods.decrypt(userRes.rows?.[0]?.name);
+      //     console.log(otherUser);
+      //   }
+      // }
+    } catch (err) {
+      console.error("Error fetching otherUser name:", err);
+    }
+
+    socket.emit("join_group", { room, otherUser });
+    if (legacyAlsoEmitJoinChat) socket.emit("join_chat", { room, otherUser });
 
     const serverOffset = Number(serverOffsetRaw ?? 0);
     const totalMessages =
@@ -427,15 +476,22 @@ io.on("connection", async (socket) => {
     const arrayTotal = [...totalMessages.rows];
     if (serverOffset === 0) arrayTotal.reverse();
 
-    arrayTotal.forEach((row) => {
+    arrayTotal.forEach(async (row) => {
+      const userRes = await db.execute({
+        sql: "SELECT name FROM users WHERE id = ?",
+        args: [row.sender_id],
+      });
+      const otherUser = decrypMethods.decrypt(userRes.rows?.[0]?.name);
       let sendData = {
         message: row.content,
         serverOffset: row.id,
         send_to: null,
         send_by: row.sender_id,
+        sender_name: otherUser,
         created_at: row.created_at,
         chatId: row.chat_id,
       };
+
       socket.emit("chat_message", sendData);
     });
 
@@ -446,7 +502,6 @@ io.on("connection", async (socket) => {
   }
 
   socket.on("join_group", async (data) => {
-    console.log("Group");
     try {
       if (data && typeof data === "object" && data.chatId !== undefined) {
         await handleJoinGroup(data.chatId, data.serverOffset, false);
@@ -460,16 +515,35 @@ io.on("connection", async (socket) => {
 
   socket.on("join_chat", async (data) => {
     try {
-      const userKey =
-        socket.userKey ?? String(socket.handshake.auth?.username ?? "");
+      const userKey = socket.userKey ?? String(socket.handshake.auth?.id ?? "");
       if (!userKey) return;
 
       if (
         (typeof data === "number" && Number.isFinite(data)) ||
         (typeof data === "string" && /^\d+$/.test(data))
       ) {
-        await handleJoinGroup(data, 0, true);
-        return;
+        const potentialChatId = Number(data);
+        const isPart = await requireChatParticipant(potentialChatId, userKey);
+
+        if (isPart) {
+          await handleJoinGroup(data, 0, true);
+          return;
+        }
+
+        // Not a participant. Check if it is a group.
+        const chatCheck = await db.execute({
+          sql: "SELECT is_group FROM chats WHERE id = ?",
+          args: [potentialChatId],
+        });
+        const chatRow = chatCheck.rows?.[0];
+
+        if (chatRow && chatRow.is_group === 1) {
+          socket.emit("chat_error", {
+            message: "No eres participante de este chat",
+          });
+          return;
+        }
+        // Fallthrough to treat as peerKey (User ID)
       }
 
       if (data && typeof data === "object" && data.chatId !== undefined) {
@@ -485,7 +559,19 @@ io.on("connection", async (socket) => {
       );
       console.log(`para hablar con ${peerKey}`);
 
-      socket.emit("join_chat", nameRoom);
+      let otherUser = null;
+      try {
+        const userRes = await db.execute({
+          sql: "SELECT name FROM users WHERE id = ?",
+          args: [peerKey],
+        });
+        // otherUser = userRes.rows?.[0]?.name;
+        otherUser = decrypMethods.decrypt(userRes.rows?.[0]?.name);
+      } catch (err) {
+        console.error("Error fetching otherUser name for peerKey:", err);
+      }
+
+      socket.emit("join_chat", { room: nameRoom, otherUser });
 
       const chatId = await getOrCreateDirectChatId(userKey, peerKey);
       socket.join(`chat:${chatId}`);
@@ -521,24 +607,15 @@ io.on("connection", async (socket) => {
         sql: "UPDATE messages SET is_read = 1 WHERE chat_id = ? AND sender_id <> ? AND is_read = 0",
         args: [chatId, userKey],
       });
-    } catch (error) {
-      console.log(error);
-    }
+    } catch (error) {}
   });
-
-  // socket.on("leave_chat", async (data) => {
-  //     let nameRoom = utilsSockets.createNameChatRooms(socket.handshake.auth.username, data);
-  //     socket.leave(nameRoom);
-  //     console.log(socket.rooms);
-  //     console.log("El usuario " + socket.handshake.auth.username + " se ha ido del chat con el id " + socket.id);
-  //     console.log(`para hablar con ${data}`)
-  //     socket.emit("leave_chat", "Hasta luego");
-  // })
 
   socket.on("chat_message", async (data, ack) => {
     let result;
-    const send_by =
-      socket.userKey ?? String(socket.handshake.auth?.username ?? "");
+    const send_by = socket.userKey ?? String(socket.handshake.auth?.id ?? "");
+    let senderName = socket.user?.name
+      ? decrypMethods.decrypt(socket.user.name)
+      : null;
     let message = data.message;
     let send_to = data.send_to;
     let now;
@@ -595,7 +672,6 @@ io.on("connection", async (socket) => {
         });
       } catch {}
     } catch (error) {
-      console.log(error);
       if (typeof ack === "function") {
         ack({
           status: "error",
@@ -612,19 +688,10 @@ io.on("connection", async (socket) => {
       serverOffset: result.lastInsertRowid.toString(),
       send_to: send_to,
       send_by: send_by,
+      sender_name: senderName,
       created_at: now ?? new Date().toISOString(),
       chatId: chatId,
     };
-
-    console.log(
-      "[ws] emit chat_message",
-      JSON.stringify({
-        chatId,
-        from: send_by,
-        to: isGroup ? "group" : send_to,
-        message,
-      }),
-    );
 
     socket.emit("chat_message", sendData);
 
@@ -637,51 +704,24 @@ io.on("connection", async (socket) => {
       const recipients = (participants.rows ?? [])
         .map((r) => String(r.user_id))
         .filter((id) => id !== String(send_by));
-      console.log(
-        "[ws] group recipients",
-        JSON.stringify({ chatId, recipients }),
-      );
 
       (participants.rows ?? []).forEach((row) => {
         if (String(row.user_id) === String(send_by)) return;
-        console.log(
-          "[ws] -> user chat_message",
-          JSON.stringify({ to: String(row.user_id), chatId, from: send_by }),
-        );
         io.to(`user:${row.user_id}`).emit("chat_message", sendData);
-        console.log(
-          "[ws] -> user receiveNotification",
-          JSON.stringify({
-            to: String(row.user_id),
-            chatId,
-            sender: send_by,
-            content: message,
-          }),
-        );
+
         io.to(`user:${row.user_id}`).emit("receiveNotification", {
           sender: send_by,
           chatId: chatId,
+          sender_name: senderName,
           content: message,
         });
       });
     } else {
-      console.log(
-        "[ws] -> user chat_message",
-        JSON.stringify({ to: String(send_to), chatId, from: send_by }),
-      );
       io.to(`user:${send_to}`).emit("chat_message", sendData);
 
-      console.log(
-        "[ws] -> user receiveNotification",
-        JSON.stringify({
-          to: String(send_to),
-          chatId,
-          sender: send_by,
-          content: message,
-        }),
-      );
       io.to(`user:${send_to}`).emit("receiveNotification", {
         sender: send_by,
+        senderName: senderName,
         chatId: await getOrCreateDirectChatId(send_by, send_to),
         content: message,
       });

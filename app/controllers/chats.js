@@ -3,8 +3,7 @@ import db from "../database.js";
 
 function getAuthUserKey(req) {
   const user = req.user ?? {};
-  const raw =
-    user.id ?? user.user_id ?? user.userId ?? user.username ?? user.email;
+  const raw = user.id ?? user.user_id ?? user.userId ?? user.email;
   if (raw === undefined || raw === null) return null;
   return String(raw);
 }
@@ -277,13 +276,9 @@ async function getChatByTripId(req, res) {
       sql: "SELECT * FROM chats WHERE is_group = 1 AND trip_id = ? LIMIT 1",
       args: [tripId],
     });
-    console.log(result);
     const chat = result.rows?.[0] ?? null;
-    console.log("Chat", chat);
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
-    console.log("Pasa el chat");
     const userKey = await requireParticipant(req, res, Number(chat.id));
-    console.log(userKey);
     if (!userKey) return;
 
     const participants = await db.execute({
