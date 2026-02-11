@@ -32,6 +32,7 @@ const io = new Server(server, {
   cors: {
     origin: [frontend_origin],
     methods: ["GET", "POST"],
+    credentials: true,
   },
 });
 
@@ -353,17 +354,11 @@ app.use(express.static(__dirname + "\\public"));
 app.use(morgan("dev")); // Middleware para registrar las peticiones HTTP en la consola
 app.use(express.json());
 app.use(cookieParser());
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "http://192.168.0.36:5173"], // Cambia esto a la URL de tu frontend
-    methods: "GET,POST,PUT,PATCH,DELETE",
-    credentials: true, // Permite el uso de cookies
-  }),
-);
 
 io.on("connection", async (socket) => {
   const socketUserKey =
     socket.userKey ?? String(socket.handshake.auth?.id ?? "");
+  console.log("Usuario conectado");
   if (socketUserKey) {
     socket.join(`user:${socketUserKey}`);
     try {
