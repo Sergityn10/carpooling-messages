@@ -22,9 +22,6 @@ const server = createServer(app);
 let frontend_origin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
 //Creamos el servidor socket.io
 const io = new Server(server, {
-  withCredentials: true, // <--- OBLIGATORIO para que viajen las cookies/JWT
-  transports: ["websocket", "polling"], // Intenta websocket primero
-  autoConnect: true,
   maxDisconnectionDelay: 5000,
   connectionStateRecovery: {
     maxDisconnectionDuration: 2 * 60 * 1000,
