@@ -19,6 +19,7 @@ const app = express();
 const port = process.env.PORT ?? 4003;
 //Creamos el servidor http
 const server = createServer(app);
+let trayectos_origin = process.env.TRAYECTOS_URL;
 let frontend_origin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
 //Creamos el servidor socket.io
 const io = new Server(server, {
@@ -88,7 +89,7 @@ io.use(async (socket, next) => {
 });
 app.use(
   cors({
-    origin: [frontend_origin], // Cambia esto a la URL de tu frontend
+    origin: [frontend_origin, trayectos_origin, "https://www.youconnext.es"], // Cambia esto a la URL de tu frontend
     methods: "GET,POST,PUT,PATCH,DELETE",
     credentials: true, // Permite el uso de cookies
   }),
