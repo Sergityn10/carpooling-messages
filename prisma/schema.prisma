@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Chat {
+  id                     Int       @id @default(autoincrement())
+  is_group               Boolean   @default(false)
+  name                   String?   @db.VarChar(255)
+  trip_id                String?  @db.Char(36)
+  admin_id               String?   @db.Char(36)
+  last_message_content   String?   @db.Text
+  last_message_at        DateTime?
+  last_message_sender_id String?   @db.Char(36)
+  created_at             DateTime  @default(now())
+
+  messages     Message[]
+  participants ChatParticipant[]
+
+  @@index([trip_id])
+  @@index([admin_id])
+  @@index([last_message_at])
+  @@index([is_group, last_message_at, created_at])
+  @@map("chats")
+}
+
+model Message {
+  id         Int      @id @default(autoincrement())
+  chat_id    Int
+  sender_id  String   @db.Char(36)
+  content    String   @db.Text
+  type       String   @default("TEXT") @db.VarChar(20)
+  is_read    Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  chat Chat @relation(fields: [chat_id], references: [id], onDelete: Cascade)
+
+  @@index([chat_id, id])
+  @@index([chat_id, is_read, id])
+  @@index([created_at])
+  @@map("messages")
+}
+
+model ChatParticipant {
+  chat_id   Int
+  user_id   String   @db.Char(36)
+  joined_at DateTime @default(now())
+
+  chat Chat @relation(fields: [chat_id], references: [id], onDelete: Cascade)
+
+  @@id([chat_id, user_id])
+  @@index([user_id, chat_id])
+  @@map("chat_participants")
+}

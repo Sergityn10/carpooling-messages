@@ -12,6 +12,7 @@ import { utilsSockets } from "../utils/sockets.js";
 import { utilsAuthentication as auth } from "./controllers/auth.js";
 import { chatsController } from "./controllers/chats.js";
 import { methods as decrypMethods } from "../utils/crypto.js";
+import { verifyToken } from "../utils/jwtVerify.js";
 dotenv.config();
 
 const __dirname = process.cwd();
@@ -48,34 +49,18 @@ async function authenticateSocketIfPossible(socket) {
     return;
   }
 
-  const usuariosUrl = process.env.USUARIOS_URL;
-  if (!usuariosUrl) {
+  try {
+    const decoded = verifyToken(token);
+    socket.user = decoded;
+    const userKey = getUserKeyFromUser(socket.user);
+    if (userKey) {
+      socket.userKey = userKey;
+      socket.handshake.auth.id = userKey;
+    }
+  } catch (error) {
+    console.error("Error al validar el token del socket:", error.message);
     const fallback = socket.handshake.auth?.id;
     if (fallback) socket.userKey = String(fallback);
-    return;
-  }
-
-  const cookieHeaderValue = `access_token=${token}`;
-  const response = await fetch(`${usuariosUrl}/api/auth/validate`, {
-    method: "GET",
-    credentials: "include",
-    headers: {
-      Cookie: cookieHeaderValue,
-    },
-  });
-
-  if (!response.ok) {
-    const fallback = socket.handshake.auth?.id;
-    if (fallback) socket.userKey = String(fallback);
-    return;
-  }
-
-  const data = await response.json();
-  socket.user = data?.data;
-  const userKey = getUserKeyFromUser(socket.user);
-  if (userKey) {
-    socket.userKey = userKey;
-    socket.handshake.auth.id = userKey;
   }
 }
 
@@ -95,180 +80,7 @@ app.use(
   }),
 );
 
-//BASE DE DATOS
-
-await db.execute(`
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL UNIQUE,
-        password TEXT NULL,
-        img_perfil TEXT,
-        name TEXT,
-        phone TEXT,
-        fecha_nacimiento TEXT NULL,
-        dni TEXT NULL UNIQUE,
-        genero TEXT NULL CHECK (genero IN ('Masculino','Femenino','Otro')),
-        stripe_account TEXT,
-        stripe_customer_account TEXT,
-        ciudad TEXT NULL,
-        provincia TEXT NULL,
-        codigo_postal TEXT NULL,
-        direccion TEXT NULL,
-        onboarding_ended INTEGER NOT NULL DEFAULT 0,
-        about_me TEXT,
-        auth_method TEXT CHECK (auth_method IN ('password', 'google', 'other')) NOT NULL DEFAULT 'password',
-        google_id TEXT NULL,
-        created_at TEXT DEFAULT (CURRENT_TIMESTAMP),
-        updated_at TEXT DEFAULT (CURRENT_TIMESTAMP)
-    );
-`);
-
-await db.execute(`
-    CREATE TABLE IF NOT EXISTS chats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        is_group INTEGER DEFAULT 0,
-        name TEXT,
-        trip_id INTEGER,
-        admin_id INTEGER,
-        last_message_content TEXT,
-        last_message_at DATETIME,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-`);
-
-try {
-  await db.execute("ALTER TABLE chats ADD COLUMN last_message_sender_id TEXT");
-} catch {}
-
-await db.execute(`
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER NOT NULL,
-    sender_id TEXT NOT NULL, -- Quién lo envió
-    
-    content TEXT NOT NULL,
-    type TEXT DEFAULT 'TEXT',   -- 'TEXT', 'IMAGE', 'SYSTEM'
-    
-    is_read INTEGER DEFAULT 0,  -- 0 = No leído, 1 = Leído
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-
-    FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-);
-`);
-
-try {
-  const fk = await db.execute("PRAGMA foreign_key_list(messages)");
-  const info = await db.execute("PRAGMA table_info(messages)");
-
-  const fks = fk.rows ?? [];
-  const cols = info.rows ?? [];
-  const byName = new Set(cols.map((c) => String(c.name)));
-  const senderCol = cols.find((c) => String(c.name) === "sender_id");
-  const senderType = String(senderCol?.type ?? "").toUpperCase();
-
-  const needsMigration =
-    fks.some((r) => String(r.table) === "users") ||
-    !byName.has("chat_id") ||
-    !byName.has("sender_id") ||
-    !senderType.includes("TEXT") ||
-    !byName.has("content");
-
-  if (needsMigration) {
-    const tables = await db.execute({
-      sql: "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('messages', 'messages_old')",
-    });
-    const existingNames = new Set(
-      (tables.rows ?? []).map((r) => String(r.name)),
-    );
-
-    if (existingNames.has("messages") && !existingNames.has("messages_old")) {
-      await db.execute("ALTER TABLE messages RENAME TO messages_old");
-
-      await db.execute(`
-CREATE TABLE messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_id INTEGER NOT NULL,
-  sender_id TEXT NOT NULL,
-  content TEXT NOT NULL,
-  type TEXT DEFAULT 'TEXT',
-  is_read INTEGER DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
-);
-`);
-
-      const oldInfo = await db.execute("PRAGMA table_info(messages_old)");
-      const oldCols = oldInfo.rows ?? [];
-      const oldByName = new Set(oldCols.map((c) => String(c.name)));
-
-      const has = (name) => oldByName.has(name);
-      const selectId = has("id") ? "id" : null;
-      const selectChatId = has("chat_id")
-        ? "chat_id"
-        : has("conversation_id")
-          ? "conversation_id"
-          : null;
-
-      if (selectChatId) {
-        const senderExpr = has("sender_id")
-          ? "CAST(sender_id AS TEXT)"
-          : has("send_by")
-            ? "CAST(send_by AS TEXT)"
-            : "NULL";
-        const contentExpr = has("content")
-          ? "content"
-          : has("message")
-            ? "message"
-            : "''";
-        const typeExpr = has("type") ? "type" : "'TEXT'";
-        const isReadExpr = has("is_read")
-          ? "is_read"
-          : has("readed")
-            ? "readed"
-            : "0";
-        const createdExpr = has("created_at")
-          ? "created_at"
-          : "CURRENT_TIMESTAMP";
-
-        if (selectId) {
-          await db.execute({
-            sql: `INSERT INTO messages (id, chat_id, sender_id, content, type, is_read, created_at)
-                  SELECT ${selectId}, ${selectChatId} AS chat_id, ${senderExpr} AS sender_id, ${contentExpr} AS content, ${typeExpr} AS type, ${isReadExpr} AS is_read, ${createdExpr} AS created_at
-                  FROM messages_old
-                  WHERE ${selectChatId} IS NOT NULL AND ${senderExpr} IS NOT NULL`,
-          });
-        } else {
-          await db.execute({
-            sql: `INSERT INTO messages (chat_id, sender_id, content, type, is_read, created_at)
-                  SELECT ${selectChatId} AS chat_id, ${senderExpr} AS sender_id, ${contentExpr} AS content, ${typeExpr} AS type, ${isReadExpr} AS is_read, ${createdExpr} AS created_at
-                  FROM messages_old
-                  WHERE ${selectChatId} IS NOT NULL AND ${senderExpr} IS NOT NULL`,
-          });
-        }
-      }
-    }
-  }
-} catch {}
-
-await db.execute(`
-    CREATE TABLE IF NOT EXISTS chat_participants (
-        chat_id INTEGER NOT NULL,
-        user_id TEXT NOT NULL,
-        joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (chat_id, user_id)
-    )
-`);
-
-try {
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS idx_chat_participants_user ON chat_participants (user_id, chat_id)",
-  );
-} catch {}
-try {
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS idx_chats_group_inbox ON chats (is_group, last_message_at, created_at)",
-  );
-} catch {}
+//BASE DE DATOS — Las tablas se gestionan con Prisma (prisma/schema.prisma)
 
 async function getOrCreateDirectChatId(userA, userB) {
   if (!userA || !userB) throw new Error("userA/userB requeridos");
@@ -325,20 +137,6 @@ async function chatExists(chatId) {
   const row = result.rows?.[0] ?? null;
   return Boolean(row);
 }
-
-try {
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages (chat_id, id)",
-  );
-} catch {}
-try {
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS idx_messages_unread_chat ON messages (chat_id, is_read, id)",
-  );
-} catch {}
-await db.execute(`
-CREATE TABLE IF NOT EXISTS pre_register (city TEXT NOT NULL, email TEXT NOT NULL PRIMARY KEY);
-`);
 
 //MIDDLEWARES
 app.disable("x-powered-by"); // Desactiva el encabezado x-powered-by
@@ -473,11 +271,6 @@ io.on("connection", async (socket) => {
     if (serverOffset === 0) arrayTotal.reverse();
 
     arrayTotal.forEach(async (row) => {
-      const userRes = await db.execute({
-        sql: "SELECT name FROM users WHERE id = ?",
-        args: [row.sender_id],
-      });
-      const otherUser = decrypMethods.decrypt(userRes.rows?.[0]?.name);
       let sendData = {
         message: row.content,
         serverOffset: row.id,
@@ -556,16 +349,6 @@ io.on("connection", async (socket) => {
       console.log(`para hablar con ${peerKey}`);
 
       let otherUser = null;
-      try {
-        const userRes = await db.execute({
-          sql: "SELECT name FROM users WHERE id = ?",
-          args: [peerKey],
-        });
-        // otherUser = userRes.rows?.[0]?.name;
-        otherUser = decrypMethods.decrypt(userRes.rows?.[0]?.name);
-      } catch (err) {
-        console.error("Error fetching otherUser name for peerKey:", err);
-      }
 
       socket.emit("join_chat", { room: nameRoom, otherUser });
 

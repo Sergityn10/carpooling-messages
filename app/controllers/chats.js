@@ -62,12 +62,13 @@ async function requireAdmin(req, res, chatId) {
 }
 
 const userKeySchema = z
-  .union([z.string().min(1), z.number().int()])
+  .string()
+  .uuid()
   .transform((v) => String(v));
 
 const createGroupChatSchema = z.object({
   name: z.string().min(1).optional(),
-  trip_id: z.number().int().nullable().optional(),
+  trip_id: z.string().uuid().nullable().optional(),
   admin_id: userKeySchema.optional(),
   participant_ids: z.array(userKeySchema).optional(),
 });
@@ -75,7 +76,7 @@ const createGroupChatSchema = z.object({
 const updateGroupChatSchema = z
   .object({
     name: z.string().min(1).optional(),
-    trip_id: z.number().int().nullable().optional(),
+    trip_id: z.string().uuid().nullable().optional(),
     admin_id: userKeySchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, {
@@ -268,9 +269,8 @@ async function listChatsByUser(req, res) {
 
 async function getChatByTripId(req, res) {
   try {
-    const tripId = Number(req.params.tripId);
-    if (!Number.isFinite(tripId))
-      return res.status(400).json({ error: "tripId inválido" });
+    const tripId = String(req.params.tripId);
+    if (!tripId) return res.status(400).json({ error: "tripId inválido" });
 
     const result = await db.execute({
       sql: "SELECT * FROM chats WHERE is_group = 1 AND trip_id = ? LIMIT 1",
