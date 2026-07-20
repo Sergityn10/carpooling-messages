@@ -10,6 +10,7 @@ datasource db {
 model Chat {
   id                     Int       @id @default(autoincrement())
   is_group               Boolean   @default(false)
+  chat_type              String    @default("DIRECT") @db.VarChar(20)
   name                   String?   @db.VarChar(255)
   trip_id                String?  @db.Char(36)
   admin_id               String?   @db.Char(36)
@@ -22,6 +23,7 @@ model Chat {
   participants ChatParticipant[]
 
   @@index([trip_id])
+  @@index([chat_type, trip_id])
   @@index([admin_id])
   @@index([last_message_at])
   @@index([is_group, last_message_at, created_at])

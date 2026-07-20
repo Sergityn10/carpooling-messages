@@ -1,27 +1,35 @@
 import { z } from "zod";
-import db from "../database.js";
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
 
 function getAuthUserKey(req) {
   const user = req.user ?? {};
-  const raw = user.id ?? user.user_id ?? user.userId ?? user.email;
+  const raw =
+    user.id ??
+    user.user_id ??
+    user.userId ??
+    user.email ??
+    user.sub ??
+    user.uid;
   if (raw === undefined || raw === null) return null;
   return String(raw);
 }
 
 async function getGroupChatById(chatId) {
-  const result = await db.execute({
-    sql: "SELECT * FROM chats WHERE id = ? AND is_group = 1",
-    args: [chatId],
+  return await prisma.chat.findFirst({
+    where: { id: chatId, is_group: true },
   });
-  return result.rows?.[0] ?? null;
 }
 
+const CHAT_TYPES = ["DIRECT", "TRAYECTO", "VIAJE", "EVENT"];
+const chatTypeSchema = z.enum(CHAT_TYPES);
+
 async function isParticipant(chatId, userKey) {
-  const result = await db.execute({
-    sql: "SELECT 1 AS ok FROM chat_participants WHERE chat_id = ? AND user_id = ? LIMIT 1",
-    args: [chatId, userKey],
+  const participant = await prisma.chatParticipant.findFirst({
+    where: { chat_id: chatId, user_id: userKey },
   });
-  return Boolean(result.rows?.[0]?.ok);
+  return Boolean(participant);
 }
 
 async function requireParticipant(req, res, chatId) {
@@ -68,6 +76,7 @@ const userKeySchema = z
 
 const createGroupChatSchema = z.object({
   name: z.string().min(1).optional(),
+  chat_type: chatTypeSchema.default("TRAYECTO"),
   trip_id: z.string().uuid().nullable().optional(),
   admin_id: userKeySchema.optional(),
   participant_ids: z.array(userKeySchema).optional(),
@@ -76,6 +85,7 @@ const createGroupChatSchema = z.object({
 const updateGroupChatSchema = z
   .object({
     name: z.string().min(1).optional(),
+    chat_type: chatTypeSchema.optional(),
     trip_id: z.string().uuid().nullable().optional(),
     admin_id: userKeySchema.optional(),
   })
@@ -97,47 +107,45 @@ const updateMessageSchema = z.object({
 });
 
 async function listGroupChatsByUserKey(userKey) {
-  const result = await db.execute({
-    sql: `
-            SELECT c.*
-            FROM chats c
-            JOIN chat_participants cp ON cp.chat_id = c.id
-            WHERE c.is_group = 1 AND cp.user_id = ?
-            ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
-        `,
-    args: [userKey],
+  const chats = await prisma.chat.findMany({
+    where: {
+      is_group: true,
+      participants: { some: { user_id: userKey } },
+    },
   });
-  return result.rows ?? [];
+  chats.sort((a, b) => {
+    const da = new Date(a.last_message_at ?? a.created_at).getTime();
+    const dbb = new Date(b.last_message_at ?? b.created_at).getTime();
+    return dbb - da;
+  });
+  return chats;
 }
 
 async function listAllChatsByUserKey(userKey) {
-  const directResult = await db.execute({
-    sql: `
-            SELECT c.id AS chat_id, c.*, other.user_id AS peer_id
-            FROM chats c
-            JOIN chat_participants me ON me.chat_id = c.id AND me.user_id = ?
-            LEFT JOIN chat_participants other ON other.chat_id = c.id AND other.user_id <> me.user_id
-            WHERE c.is_group = 0
-            ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
-        `,
-    args: [userKey],
+  const directChatsRaw = await prisma.chat.findMany({
+    where: {
+      is_group: false,
+      participants: { some: { user_id: userKey } },
+    },
+    include: {
+      participants: {
+        where: { user_id: { not: userKey } },
+        select: { user_id: true },
+      },
+    },
   });
 
-  const groupResult = await db.execute({
-    sql: `
-            SELECT c.id AS chat_id, c.*
-            FROM chats c
-            JOIN chat_participants me ON me.chat_id = c.id AND me.user_id = ?
-            WHERE c.is_group = 1
-            ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
-        `,
-    args: [userKey],
+  const groupChatsRaw = await prisma.chat.findMany({
+    where: {
+      is_group: true,
+      participants: { some: { user_id: userKey } },
+    },
   });
 
-  const directChats = (directResult.rows ?? []).map((c) => ({
+  const directChats = directChatsRaw.map((c) => ({
     send_by: userKey,
-    send_to: c.peer_id,
-    chat_id: c.chat_id,
+    send_to: c.participants[0]?.user_id ?? null,
+    chat_id: c.id,
     is_group: 0,
     lastMessage: {
       message: c.last_message_content ?? null,
@@ -146,9 +154,9 @@ async function listAllChatsByUserKey(userKey) {
     },
   }));
 
-  const groupChats = (groupResult.rows ?? []).map((c) => ({
+  const groupChats = groupChatsRaw.map((c) => ({
     ...c,
-    chat_id: c.chat_id,
+    chat_id: c.id,
     is_group: 1,
     lastMessage: {
       message: c.last_message_content ?? null,
@@ -171,27 +179,28 @@ async function listAllChatsByUserKey(userKey) {
 }
 
 async function recomputeAndUpdateLastMessage(chatId) {
-  const last = await db.execute({
-    sql: `
-            SELECT id, sender_id, content, created_at
-            FROM messages
-            WHERE chat_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-        `,
-    args: [chatId],
+  const lastMessage = await prisma.message.findFirst({
+    where: { chat_id: chatId },
+    orderBy: { id: "desc" },
   });
-  const row = last.rows?.[0];
-  if (!row) {
-    await db.execute({
-      sql: "UPDATE chats SET last_message_content = NULL, last_message_at = NULL, last_message_sender_id = NULL WHERE id = ?",
-      args: [chatId],
+  if (!lastMessage) {
+    await prisma.chat.update({
+      where: { id: chatId },
+      data: {
+        last_message_content: null,
+        last_message_at: null,
+        last_message_sender_id: null,
+      },
     });
     return;
   }
-  await db.execute({
-    sql: "UPDATE chats SET last_message_content = ?, last_message_at = ?, last_message_sender_id = ? WHERE id = ?",
-    args: [row.content, row.created_at, row.sender_id, chatId],
+  await prisma.chat.update({
+    where: { id: chatId },
+    data: {
+      last_message_content: lastMessage.content,
+      last_message_at: lastMessage.created_at,
+      last_message_sender_id: lastMessage.sender_id,
+    },
   });
 }
 
@@ -205,32 +214,27 @@ async function createGroupChat(req, res) {
     const adminKey = parsed.data.admin_id ?? authUserKey;
     if (!adminKey) return res.status(400).json({ error: "admin_id requerido" });
 
-    const now = new Date().toISOString();
-    const result = await db.execute({
-      sql: "INSERT INTO chats (is_group, name, trip_id, admin_id, created_at) VALUES (1, ?, ?, ?, ?)",
-      args: [
-        parsed.data.name ?? null,
-        parsed.data.trip_id ?? null,
-        adminKey,
-        now,
-      ],
-    });
-
-    const chatId = Number(result.lastInsertRowid);
     const participants = new Set([
       adminKey,
       ...(parsed.data.participant_ids ?? []),
     ]);
-    for (const userKey of participants) {
-      try {
-        await db.execute({
-          sql: "INSERT INTO chat_participants (chat_id, user_id, joined_at) VALUES (?, ?, ?)",
-          args: [chatId, userKey, now],
-        });
-      } catch {}
-    }
 
-    const chat = await getGroupChatById(chatId);
+    const chat = await prisma.chat.create({
+      data: {
+        is_group: true,
+        chat_type: parsed.data.chat_type,
+        name: parsed.data.name ?? null,
+        trip_id: parsed.data.trip_id ?? null,
+        admin_id: adminKey,
+        participants: {
+          create: [...participants].map((userKey) => ({
+            user_id: userKey,
+          })),
+        },
+      },
+      include: { participants: true },
+    });
+
     return res.status(201).json({ chat });
   } catch (error) {
     console.error(error);
@@ -272,21 +276,24 @@ async function getChatByTripId(req, res) {
     const tripId = String(req.params.tripId);
     if (!tripId) return res.status(400).json({ error: "tripId inválido" });
 
-    const result = await db.execute({
-      sql: "SELECT * FROM chats WHERE is_group = 1 AND trip_id = ? LIMIT 1",
-      args: [tripId],
+    const chatType = req.query.type ?? "TRAYECTO";
+    if (!CHAT_TYPES.includes(chatType) || chatType === "DIRECT") {
+      return res.status(400).json({ error: "type inválido" });
+    }
+
+    const chat = await prisma.chat.findFirst({
+      where: { is_group: true, chat_type: chatType, trip_id: tripId },
     });
-    const chat = result.rows?.[0] ?? null;
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
     const userKey = await requireParticipant(req, res, Number(chat.id));
     if (!userKey) return;
 
-    const participants = await db.execute({
-      sql: "SELECT user_id, joined_at FROM chat_participants WHERE chat_id = ? ORDER BY joined_at ASC",
-      args: [Number(chat.id)],
+    const participants = await prisma.chatParticipant.findMany({
+      where: { chat_id: Number(chat.id) },
+      orderBy: { joined_at: "asc" },
     });
 
-    return res.json({ chat, participants: participants.rows ?? [] });
+    return res.json({ chat, participants });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Error al obtener el chat" });
@@ -334,12 +341,12 @@ async function getGroupChat(req, res) {
     const chat = await getGroupChatById(chatId);
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
 
-    const participants = await db.execute({
-      sql: "SELECT user_id, joined_at FROM chat_participants WHERE chat_id = ? ORDER BY joined_at ASC",
-      args: [chatId],
+    const participants = await prisma.chatParticipant.findMany({
+      where: { chat_id: chatId },
+      orderBy: { joined_at: "asc" },
     });
 
-    return res.json({ chat, participants: participants.rows ?? [] });
+    return res.json({ chat, participants });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Error al obtener el chat" });
@@ -359,14 +366,15 @@ async function updateGroupChat(req, res) {
     if (!parsed.success)
       return res.status(400).json({ error: parsed.error.message });
 
-    await db.execute({
-      sql: "UPDATE chats SET name = COALESCE(?, name), trip_id = COALESCE(?, trip_id), admin_id = COALESCE(?, admin_id) WHERE id = ? AND is_group = 1",
-      args: [
-        parsed.data.name ?? null,
-        parsed.data.trip_id ?? null,
-        parsed.data.admin_id ?? null,
-        chatId,
-      ],
+    const data = {};
+    if (parsed.data.name) data.name = parsed.data.name;
+    if (parsed.data.chat_type) data.chat_type = parsed.data.chat_type;
+    if (parsed.data.trip_id) data.trip_id = parsed.data.trip_id;
+    if (parsed.data.admin_id) data.admin_id = parsed.data.admin_id;
+
+    await prisma.chat.updateMany({
+      where: { id: chatId, is_group: true },
+      data,
     });
 
     const chat = await getGroupChatById(chatId);
@@ -386,9 +394,8 @@ async function deleteGroupChat(req, res) {
     const adminKey = await requireAdmin(req, res, chatId);
     if (!adminKey) return;
 
-    await db.execute({
-      sql: "DELETE FROM chats WHERE id = ? AND is_group = 1",
-      args: [chatId],
+    await prisma.chat.deleteMany({
+      where: { id: chatId, is_group: true },
     });
 
     return res.status(204).send();
@@ -407,11 +414,11 @@ async function listParticipants(req, res) {
     const userKey = await requireParticipant(req, res, chatId);
     if (!userKey) return;
 
-    const result = await db.execute({
-      sql: "SELECT user_id, joined_at FROM chat_participants WHERE chat_id = ? ORDER BY joined_at ASC",
-      args: [chatId],
+    const participants = await prisma.chatParticipant.findMany({
+      where: { chat_id: chatId },
+      orderBy: { joined_at: "asc" },
     });
-    return res.json(result.rows ?? []);
+    return res.json(participants);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Error al obtener participantes" });
@@ -431,11 +438,9 @@ async function addParticipant(req, res) {
     if (!parsed.success)
       return res.status(400).json({ error: parsed.error.message });
 
-    const now = new Date().toISOString();
     try {
-      await db.execute({
-        sql: "INSERT INTO chat_participants (chat_id, user_id, joined_at) VALUES (?, ?, ?)",
-        args: [chatId, parsed.data.user_id, now],
+      await prisma.chatParticipant.create({
+        data: { chat_id: chatId, user_id: parsed.data.user_id },
       });
     } catch {
       return res.status(409).json({ error: "El usuario ya es participante" });
@@ -461,9 +466,8 @@ async function removeParticipant(req, res) {
     const adminKey = await requireAdmin(req, res, chatId);
     if (!adminKey) return;
 
-    await db.execute({
-      sql: "DELETE FROM chat_participants WHERE chat_id = ? AND user_id = ?",
-      args: [chatId, userKeyToRemove],
+    await prisma.chatParticipant.deleteMany({
+      where: { chat_id: chatId, user_id: userKeyToRemove },
     });
 
     return res.status(204).send();
@@ -485,21 +489,15 @@ async function listMessages(req, res) {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit ?? 50)));
     const beforeId = req.query.before_id ? Number(req.query.before_id) : null;
 
-    const where = beforeId ? "chat_id = ? AND id < ?" : "chat_id = ?";
-    const args = beforeId ? [chatId, beforeId] : [chatId];
-    const result = await db.execute({
-      sql: `
-                SELECT id, chat_id, sender_id, content, type, is_read, created_at
-                FROM messages
-                WHERE ${where}
-                ORDER BY id DESC
-                LIMIT ?
-            `,
-      args: [...args, limit],
+    const messages = await prisma.message.findMany({
+      where: beforeId
+        ? { chat_id: chatId, id: { lt: beforeId } }
+        : { chat_id: chatId },
+      orderBy: { id: "desc" },
+      take: limit,
     });
-    const rows = result.rows ?? [];
-    rows.reverse();
-    return res.json(rows);
+    messages.reverse();
+    return res.json(messages);
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Error al obtener mensajes" });
@@ -519,31 +517,33 @@ async function createMessage(req, res) {
     if (!parsed.success)
       return res.status(400).json({ error: parsed.error.message });
 
-    const now = new Date().toISOString();
-    const result = await db.execute({
-      sql: "INSERT INTO messages (chat_id, sender_id, content, type, is_read, created_at) VALUES (?, ?, ?, ?, 0, ?)",
-      args: [
-        chatId,
-        userKey,
-        parsed.data.content,
-        parsed.data.type ?? "TEXT",
-        now,
-      ],
+    const message = await prisma.message.create({
+      data: {
+        chat_id: chatId,
+        sender_id: userKey,
+        content: parsed.data.content,
+        type: parsed.data.type ?? "TEXT",
+        is_read: false,
+      },
     });
 
-    await db.execute({
-      sql: "UPDATE chats SET last_message_content = ?, last_message_at = ?, last_message_sender_id = ? WHERE id = ? AND is_group = 1",
-      args: [parsed.data.content, now, userKey, chatId],
+    await prisma.chat.updateMany({
+      where: { id: chatId, is_group: true },
+      data: {
+        last_message_content: parsed.data.content,
+        last_message_at: message.created_at,
+        last_message_sender_id: userKey,
+      },
     });
 
     return res.status(201).json({
-      id: Number(result.lastInsertRowid),
+      id: message.id,
       chat_id: chatId,
       sender_id: userKey,
       content: parsed.data.content,
       type: parsed.data.type ?? "TEXT",
-      is_read: 0,
-      created_at: now,
+      is_read: false,
+      created_at: message.created_at,
     });
   } catch (error) {
     console.error(error);
@@ -566,33 +566,35 @@ async function updateMessage(req, res) {
     if (!parsed.success)
       return res.status(400).json({ error: parsed.error.message });
 
-    const msg = await db.execute({
-      sql: "SELECT id, sender_id FROM messages WHERE id = ? AND chat_id = ?",
-      args: [messageId, chatId],
+    const msg = await prisma.message.findFirst({
+      where: { id: messageId, chat_id: chatId },
+      select: { id: true, sender_id: true },
     });
-    const row = msg.rows?.[0];
-    if (!row) return res.status(404).json({ error: "Mensaje no encontrado" });
+    if (!msg) return res.status(404).json({ error: "Mensaje no encontrado" });
 
     const chat = await getGroupChatById(chatId);
     const isAdmin = chat && String(chat.admin_id) === String(userKey);
-    if (!isAdmin && String(row.sender_id) !== String(userKey)) {
+    if (!isAdmin && String(msg.sender_id) !== String(userKey)) {
       return res.status(403).json({ error: "No puedes editar este mensaje" });
     }
 
-    await db.execute({
-      sql: "UPDATE messages SET content = ? WHERE id = ? AND chat_id = ?",
-      args: [parsed.data.content, messageId, chatId],
+    await prisma.message.update({
+      where: { id: messageId },
+      data: { content: parsed.data.content },
     });
 
-    const last = await db.execute({
-      sql: "SELECT id FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
-      args: [chatId],
+    const last = await prisma.message.findFirst({
+      where: { chat_id: chatId },
+      orderBy: { id: "desc" },
+      select: { id: true },
     });
-    const lastId = last.rows?.[0]?.id;
-    if (Number(lastId) === Number(messageId)) {
-      await db.execute({
-        sql: "UPDATE chats SET last_message_content = ?, last_message_sender_id = ? WHERE id = ? AND is_group = 1",
-        args: [parsed.data.content, row.sender_id, chatId],
+    if (last && last.id === messageId) {
+      await prisma.chat.updateMany({
+        where: { id: chatId, is_group: true },
+        data: {
+          last_message_content: parsed.data.content,
+          last_message_sender_id: msg.sender_id,
+        },
       });
     }
 
@@ -618,31 +620,30 @@ async function deleteMessage(req, res) {
     const userKey = await requireParticipant(req, res, chatId);
     if (!userKey) return;
 
-    const msg = await db.execute({
-      sql: "SELECT id, sender_id FROM messages WHERE id = ? AND chat_id = ?",
-      args: [messageId, chatId],
+    const msg = await prisma.message.findFirst({
+      where: { id: messageId, chat_id: chatId },
+      select: { id: true, sender_id: true },
     });
-    const row = msg.rows?.[0];
-    if (!row) return res.status(404).json({ error: "Mensaje no encontrado" });
+    if (!msg) return res.status(404).json({ error: "Mensaje no encontrado" });
 
     const chat = await getGroupChatById(chatId);
     const isAdmin = chat && String(chat.admin_id) === String(userKey);
-    if (!isAdmin && String(row.sender_id) !== String(userKey)) {
+    if (!isAdmin && String(msg.sender_id) !== String(userKey)) {
       return res.status(403).json({ error: "No puedes eliminar este mensaje" });
     }
 
-    const last = await db.execute({
-      sql: "SELECT id FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT 1",
-      args: [chatId],
+    const last = await prisma.message.findFirst({
+      where: { chat_id: chatId },
+      orderBy: { id: "desc" },
+      select: { id: true },
     });
-    const lastIdBefore = last.rows?.[0]?.id;
+    const lastIdBefore = last?.id;
 
-    await db.execute({
-      sql: "DELETE FROM messages WHERE id = ? AND chat_id = ?",
-      args: [messageId, chatId],
+    await prisma.message.deleteMany({
+      where: { id: messageId, chat_id: chatId },
     });
 
-    if (Number(lastIdBefore) === Number(messageId)) {
+    if (lastIdBefore === messageId) {
       await recomputeAndUpdateLastMessage(chatId);
     }
 
@@ -668,11 +669,9 @@ async function joinGroupChat(req, res) {
     const chat = await getGroupChatById(chatId);
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
 
-    const now = new Date().toISOString();
     try {
-      await db.execute({
-        sql: "INSERT INTO chat_participants (chat_id, user_id, joined_at) VALUES (?, ?, ?)",
-        args: [chatId, userKey, now],
+      await prisma.chatParticipant.create({
+        data: { chat_id: chatId, user_id: userKey },
       });
     } catch {
       return res.status(409).json({ error: "Ya eres participante" });
@@ -707,9 +706,8 @@ async function leaveGroupChat(req, res) {
       });
     }
 
-    await db.execute({
-      sql: "DELETE FROM chat_participants WHERE chat_id = ? AND user_id = ?",
-      args: [chatId, userKey],
+    await prisma.chatParticipant.deleteMany({
+      where: { chat_id: chatId, user_id: userKey },
     });
 
     return res.status(204).send();
