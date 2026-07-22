@@ -23,7 +23,7 @@ const port = process.env.PORT ?? 4003;
 //Creamos el servidor http
 const server = createServer(app);
 let trayectos_origin = process.env.TRAYECTOS_URL;
-let frontend_origin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
+let frontend_origin = process.env.FRONTEND_ORIGIN ?? "http://localhost:3000";
 //Creamos el servidor socket.io
 const io = new Server(server, {
   maxDisconnectionDelay: 5000,
