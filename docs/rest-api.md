@@ -172,6 +172,51 @@ GET /api/chats/trip/:tripId?type=TRAYECTO
 
 ---
 
+### Desactivar chats por trip_id
+
+```
+PATCH /api/chats/trip/:tripId/disable?type=TRAYECTO
+```
+
+Desactiva todos los chats asociados a un `trip_id` estableciendo `status = "INACTIVE"`. Pensado para ser llamado cuando un trayecto/viaje/evento finaliza o se cancela.
+
+| Parámetro | Tipo          | Descripción                  |
+| --------- | ------------- | ---------------------------- |
+| `tripId`  | UUID (string) | ID del trayecto/viaje/evento |
+
+**Query params opcionales:**
+
+| Param  | Tipo   | Default | Descripción                                              |
+| ------ | ------ | ------- | -------------------------------------------------------- |
+| `type` | string | `ALL`   | Filtrar por tipo: `TRAYECTO`, `VIAJE`, `EVENT`. Si se omite, desactiva todos los tipos. |
+
+**Respuesta `200`:**
+
+```json
+{
+  "success": true,
+  "disabledCount": 1,
+  "trip_id": "uuid-del-trayecto",
+  "chat_type": "TRAYECTO"
+}
+```
+
+| Campo           | Tipo    | Descripción                                    |
+| --------------- | ------- | ---------------------------------------------- |
+| `success`       | boolean | `true` si la operación fue exitosa             |
+| `disabledCount` | number  | Número de chats desactivados                   |
+| `trip_id`       | string  | UUID del trayecto/viaje/evento                 |
+| `chat_type`     | string  | Tipo filtrado o `ALL` si no se especificó      |
+
+**Errores:**
+
+| Status | Causa                                         |
+| ------ | --------------------------------------------- |
+| `400`  | `tripId` inválido o `type` no válido          |
+| `404`  | No se encontraron chats para ese `trip_id`    |
+
+---
+
 ### Crear chat grupal
 
 ```
@@ -262,6 +307,57 @@ PATCH /api/chats/:chatId
 | `400`  | `chatId` inválido o no hay campos para actualizar |
 | `403`  | Solo el admin puede realizar esta acción          |
 | `404`  | Chat no encontrado                                |
+
+---
+
+### Activar / desactivar un chat
+
+```
+PATCH /api/chats/:chatId/status
+```
+
+| Parámetro | Tipo    | Descripción |
+| --------- | ------- | ----------- |
+| `chatId`  | integer | ID del chat |
+
+Cambia el estado del chat (`ACTIVE` / `INACTIVE`). Funciona tanto para chats grupales como individuales. En chats grupales solo el **admin** puede cambiar el estado; en chats directos, **cualquier participante**.
+
+**Body (JSON):**
+
+```json
+{
+  "status": "INACTIVE"
+}
+```
+
+| Campo    | Tipo   | Requerido | Descripción           |
+| -------- | ------ | --------- | --------------------- |
+| `status` | string | Sí        | `ACTIVE` o `INACTIVE` |
+
+**Respuesta `200`:**
+
+```json
+{
+  "chat": {
+    "id": 3,
+    "is_group": true,
+    "chat_type": "TRAYECTO",
+    "status": "INACTIVE",
+    "name": "Viaje a Madrid",
+    "trip_id": "uuid-del-trayecto",
+    "admin_id": "uuid-del-admin",
+    "created_at": "2026-06-29T10:00:00.000Z"
+  }
+}
+```
+
+**Errores:**
+
+| Status | Causa                                                  |
+| ------ | ------------------------------------------------------ |
+| `400`  | `chatId` inválido o `status` no es `ACTIVE`/`INACTIVE` |
+| `403`  | No eres participante, o no eres el admin (chat grupal) |
+| `404`  | Chat no encontrado                                     |
 
 ---
 

@@ -15,6 +15,7 @@ Almacena tanto chats individuales como grupales.
 | `id`                     | INT AUTO_INCREMENT | No       | —                   | Clave primaria                                                  |
 | `is_group`               | BOOLEAN            | No       | `false`             | `false` = individual, `true` = grupal                           |
 | `chat_type`              | VARCHAR(20)        | No       | `'DIRECT'`          | Tipo de chat: `DIRECT`, `TRAYECTO`, `VIAJE`, `EVENT`            |
+| `status`                 | VARCHAR(20)        | No       | `'ACTIVE'`          | Estado del chat: `ACTIVE`, `INACTIVE`                           |
 | `name`                   | VARCHAR(255)       | Sí       | `NULL`              | Nombre del grupo (solo si `is_group = true`)                    |
 | `trip_id`                | CHAR(36)           | Sí       | `NULL`              | UUID del trayecto/viaje/evento asociado (microservicio externo) |
 | `admin_id`               | CHAR(36)           | Sí       | `NULL`              | UUID del admin del grupo (microservicio externo)                |
@@ -29,6 +30,7 @@ Almacena tanto chats individuales como grupales.
 | ----------------------------- | --------------------------------------- | ---------------------------------- |
 | `idx_chats_trip_id`           | `trip_id`                               | Búsqueda por trayecto/viaje/evento |
 | `idx_chats_chat_type_trip_id` | `chat_type, trip_id`                    | Búsqueda por tipo + entidad        |
+| `idx_chats_status`            | `status`                                | Filtrar chats activos/inactivos     |
 | `idx_chats_admin_id`          | `admin_id`                              | Búsqueda por admin                 |
 | `idx_chats_last_message_at`   | `last_message_at`                       | Ordenar inbox por reciente         |
 | `idx_chats_group_inbox`       | `is_group, last_message_at, created_at` | Listar chats grupales ordenados    |
@@ -116,6 +118,15 @@ La columna `chat_type` permite distinguir chats de trayectos, viajes o eventos u
 - `TRAYECTO` — Chat grupal de un trayecto
 - `VIAJE` — Chat grupal de un viaje
 - `EVENT` — Chat grupal de un evento
+
+### `status` para activar/desactivar chats
+
+La columna `status` indica si un chat está activo o inactivo:
+
+- `ACTIVE` — El chat está operativo (valor por defecto al crearlo)
+- `INACTIVE` — El chat está desactivado (p.ej. porque el trayecto finalizó o la reserva se canceló)
+
+El estado se cambia mediante `PATCH /api/chats/:chatId/status`. En chats grupales solo el admin puede cambiarlo; en chats directos, cualquier participante.
 
 ### Wrapper de compatibilidad
 

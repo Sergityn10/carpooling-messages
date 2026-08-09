@@ -554,6 +554,11 @@ app.get(
   auth.authenticate,
   chatsController.getChatByTripId,
 );
+app.patch(
+  "/api/chats/trip/:tripId/disable",
+  auth.authenticate,
+  chatsController.disableChatByTripId,
+);
 
 app.post("/api/chats", auth.authenticate, chatsController.createGroupChat);
 app.get("/api/chats/me", auth.authenticate, chatsController.listMyGroupChats);
@@ -567,6 +572,11 @@ app.patch(
   "/api/chats/:chatId",
   auth.authenticate,
   chatsController.updateGroupChat,
+);
+app.patch(
+  "/api/chats/:chatId/status",
+  auth.authenticate,
+  chatsController.updateChatStatus,
 );
 app.delete(
   "/api/chats/:chatId",

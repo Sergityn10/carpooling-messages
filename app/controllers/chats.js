@@ -25,6 +25,11 @@ async function getGroupChatById(chatId) {
 const CHAT_TYPES = ["DIRECT", "TRAYECTO", "VIAJE", "EVENT"];
 const chatTypeSchema = z.enum(CHAT_TYPES);
 
+const CHAT_STATUSES = ["ACTIVE", "INACTIVE"];
+const chatStatusSchema = z.object({
+  status: z.enum(CHAT_STATUSES),
+});
+
 async function isParticipant(chatId, userKey) {
   const participant = await prisma.chatParticipant.findFirst({
     where: { chat_id: chatId, user_id: userKey },
@@ -300,6 +305,42 @@ async function getChatByTripId(req, res) {
   }
 }
 
+async function disableChatByTripId(req, res) {
+  try {
+    const tripId = String(req.params.tripId);
+    if (!tripId) return res.status(400).json({ error: "tripId inválido" });
+
+    const chatType = req.query.type ?? undefined;
+    if (chatType && (!CHAT_TYPES.includes(chatType) || chatType === "DIRECT")) {
+      return res.status(400).json({ error: "type inválido" });
+    }
+
+    const where = { trip_id: tripId };
+    if (chatType) where.chat_type = chatType;
+
+    const result = await prisma.chat.updateMany({
+      where,
+      data: { status: "INACTIVE" },
+    });
+
+    if (result.count === 0) {
+      return res
+        .status(404)
+        .json({ error: "No se encontraron chats para ese trip_id" });
+    }
+
+    return res.json({
+      success: true,
+      disabledCount: result.count,
+      trip_id: tripId,
+      chat_type: chatType ?? "ALL",
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: "Error al desactivar el chat" });
+  }
+}
+
 async function listMyGroupChats(req, res) {
   try {
     const userKey = getAuthUserKey(req);
@@ -382,6 +423,53 @@ async function updateGroupChat(req, res) {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ error: "Error al actualizar el chat" });
+  }
+}
+
+async function updateChatStatus(req, res) {
+  try {
+    const chatId = Number(req.params.chatId);
+    if (!Number.isFinite(chatId))
+      return res.status(400).json({ error: "chatId inválido" });
+
+    const parsed = chatStatusSchema.safeParse(req.body ?? {});
+    if (!parsed.success)
+      return res.status(400).json({ error: parsed.error.message });
+
+    const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+    if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
+
+    const userKey = getAuthUserKey(req);
+    if (!userKey) {
+      return res
+        .status(400)
+        .json({ error: "No se pudo determinar el usuario autenticado" });
+    }
+
+    const ok = await isParticipant(chatId, userKey);
+    if (!ok) {
+      return res
+        .status(403)
+        .json({ error: "No eres participante de este chat" });
+    }
+
+    if (chat.is_group && String(chat.admin_id) !== String(userKey)) {
+      return res
+        .status(403)
+        .json({ error: "Solo el admin puede cambiar el estado del chat" });
+    }
+
+    const updated = await prisma.chat.update({
+      where: { id: chatId },
+      data: { status: parsed.data.status },
+    });
+
+    return res.json({ chat: updated });
+  } catch (error) {
+    console.error(error);
+    return res
+      .status(500)
+      .json({ error: "Error al actualizar el estado del chat" });
   }
 }
 
@@ -722,10 +810,12 @@ export const chatsController = {
   listMyChats,
   listChatsByUser,
   getChatByTripId,
+  disableChatByTripId,
   listMyGroupChats,
   listGroupChatsByUser,
   getGroupChat,
   updateGroupChat,
+  updateChatStatus,
   deleteGroupChat,
   joinGroupChat,
   leaveGroupChat,
