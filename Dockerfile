@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 
-RUN npm ci --omit=dev && npx prisma generate
+RUN npm ci && npx prisma generate
 
 # --- Build stage ---
 FROM base AS build
@@ -35,4 +35,4 @@ COPY public ./public
 
 EXPOSE 4002
 
-CMD ["node", "app/index.js"]
+CMD ["sh", "-c", "npx prisma db push && node app/index.js"]

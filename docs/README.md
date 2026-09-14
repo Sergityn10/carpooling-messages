@@ -17,17 +17,22 @@ Microservicio de mensajería para la plataforma Carpooling. Gestiona chats indiv
 - **Autenticación:** JWT (RS256) con verificación local mediante clave pública
 - **Validación:** Zod
 - **Cifrado:** AES-256-CBC para campos sensibles
+- **Cola de mensajes:** RabbitMQ (consumidor de eventos)
 
 ## Variables de entorno
 
-| Variable | Descripción | Ejemplo |
-|---|---|---|
-| `DATABASE_URL` | URL de conexión MySQL para Prisma | `mysql://user:pass@localhost:3306/db` |
-| `PUBLIC_KEY` | Clave pública RSA para verificar JWT | `-----BEGIN PUBLIC KEY-----\n...` |
-| `PORT` | Puerto del servidor | `4002` |
-| `FRONTEND_ORIGIN` | URL del frontend (CORS) | `http://localhost:5173` |
-| `TRAYECTOS_URL` | URL del microservicio de trayectos (CORS) | `http://localhost:4001` |
-| `ENCRYPTION_KEY` | Clave AES-256 para cifrado de campos | `estaesmiclaveultrasecreta` |
+| Variable            | Descripción                               | Ejemplo                                          |
+| ------------------- | ----------------------------------------- | ------------------------------------------------ |
+| `DATABASE_URL`      | URL de conexión MySQL para Prisma         | `mysql://user:pass@localhost:3306/db`            |
+| `PUBLIC_KEY`        | Clave pública RSA para verificar JWT      | `-----BEGIN PUBLIC KEY-----\n...`                |
+| `PORT`              | Puerto del servidor                       | `4002`                                           |
+| `FRONTEND_ORIGIN`   | URL del frontend (CORS)                   | `http://localhost:5173`                          |
+| `TRAYECTOS_URL`     | URL del microservicio de trayectos (CORS) | `http://localhost:4001`                          |
+| `USUARIOS_URL`      | URL del microservicio de usuarios         | `http://localhost:4000`                          |
+| `NOTIFICATIONS_URL` | URL del microservicio de notificaciones   | `http://localhost:3004`                          |
+| `RABBITMQ_URL`      | URL de conexión a RabbitMQ                | `amqp://carpooling:carpooling123@localhost:5672` |
+| `RABBITMQ_EXCHANGE` | Nombre del exchange de RabbitMQ           | `carpooling_events`                              |
+| `ENCRYPTION_KEY`    | Clave AES-256 para cifrado de campos      | `estaesmiclaveultrasecreta`                      |
 
 ## Arquitectura
 
@@ -46,7 +51,9 @@ carpooling-messages/
 ├── utils/
 │   ├── jwtVerify.js          # Verificación de JWT con clave pública
 │   ├── crypto.js             # Cifrado/descifrado AES-256-CBC
-│   └── sockets.js            # Utilidades para nombres de salas
+│   ├── sockets.js            # Utilidades para nombres de salas
+│   ├── notificationsClient.js # Cliente del microservicio de notificaciones
+│   └── rabbitmq.js            # Consumidor de eventos RabbitMQ
 └── docs/                     # Esta documentación
 ```
 

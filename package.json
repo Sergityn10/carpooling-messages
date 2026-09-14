@@ -14,6 +14,7 @@
   "dependencies": {
     "@libsql/client": "^0.15.15",
     "@prisma/client": "^6.19.3",
+    "amqplib": "^2.0.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

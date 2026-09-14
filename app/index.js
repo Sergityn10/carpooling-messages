@@ -14,6 +14,7 @@ import { utilsAuthentication as auth } from "./controllers/auth.js";
 import { chatsController } from "./controllers/chats.js";
 import { methods as decrypMethods } from "../utils/crypto.js";
 import notificationsClient from "../utils/notificationsClient.js";
+import { connectRabbitMQ } from "../utils/rabbitmq.js";
 import { verifyToken } from "../utils/jwtVerify.js";
 dotenv.config();
 
@@ -136,6 +137,7 @@ app.set("port", port);
 
 server.listen(port, () => {
   console.log(`Listening on port ${app.get("port")}`);
+  connectRabbitMQ();
 });
 
 app.use(express.static(__dirname + "\\public"));
