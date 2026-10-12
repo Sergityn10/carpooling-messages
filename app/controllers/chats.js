@@ -9,16 +9,16 @@ function getAuthUserKey(req) {
     user.id ??
     user.user_id ??
     user.userId ??
-    user.email ??
     user.sub ??
-    user.uid;
+    user.uid ??
+    user.email;
   if (raw === undefined || raw === null) return null;
   return String(raw);
 }
 
 async function getGroupChatById(chatId) {
   return await prisma.chat.findFirst({
-    where: { id: chatId, is_group: true },
+    where: { id: Number(chatId), is_group: true },
   });
 }
 
@@ -32,7 +32,7 @@ const chatStatusSchema = z.object({
 
 async function isParticipant(chatId, userKey) {
   const participant = await prisma.chatParticipant.findFirst({
-    where: { chat_id: chatId, user_id: userKey },
+    where: { chat_id: Number(chatId), user_id: String(userKey) },
   });
   return Boolean(participant);
 }
@@ -41,16 +41,31 @@ async function requireParticipant(req, res, chatId) {
   const userKey = getAuthUserKey(req);
   if (!userKey) {
     res
-      .status(400)
+      .status(401)
       .json({ error: "No se pudo determinar el usuario autenticado" });
     return null;
   }
-  // const ok = await isParticipant(chatId, userKey);
-  // if (!ok) {
-  //   console.log(ok);
-  //   res.status(403).json({ error: "No eres participante de este chat" });
-  //   return null;
-  // }
+
+  const chat = await prisma.chat.findUnique({
+    where: { id: Number(chatId) },
+    select: { id: true, admin_id: true },
+  });
+  if (!chat) {
+    res.status(404).json({ error: "Chat no encontrado" });
+    return null;
+  }
+
+  // Si es administrador global de la plataforma, permitir acceso
+  if (req.user?.role === "admin") {
+    return userKey;
+  }
+
+  // Validación estricta BOLA / Anti-IDOR (HIGH-06, HIGH-07, MED-06, MED-07)
+  const ok = await isParticipant(chatId, userKey);
+  if (!ok) {
+    res.status(403).json({ error: "No eres participante de este chat" });
+    return null;
+  }
   return userKey;
 }
 
@@ -58,15 +73,24 @@ async function requireAdmin(req, res, chatId) {
   const userKey = getAuthUserKey(req);
   if (!userKey) {
     res
-      .status(400)
+      .status(401)
       .json({ error: "No se pudo determinar el usuario autenticado" });
     return null;
   }
-  const chat = await getGroupChatById(chatId);
+
+  const chat = await prisma.chat.findUnique({
+    where: { id: Number(chatId) },
+  });
   if (!chat) {
     res.status(404).json({ error: "Chat no encontrado" });
     return null;
   }
+
+  // Si es administrador global de la plataforma, permitir acceso
+  if (req.user?.role === "admin") {
+    return userKey;
+  }
+
   if (String(chat.admin_id) !== String(userKey)) {
     res.status(403).json({ error: "Solo el admin puede realizar esta acción" });
     return null;
@@ -103,12 +127,12 @@ const addParticipantSchema = z.object({
 });
 
 const createMessageSchema = z.object({
-  content: z.string().min(1),
+  content: z.string().min(1).max(5000),
   type: z.string().min(1).optional(),
 });
 
 const updateMessageSchema = z.object({
-  content: z.string().min(1),
+  content: z.string().min(1).max(5000),
 });
 
 async function listGroupChatsByUserKey(userKey) {
@@ -216,7 +240,12 @@ async function createGroupChat(req, res) {
       return res.status(400).json({ error: parsed.error.message });
 
     const authUserKey = getAuthUserKey(req);
-    const adminKey = parsed.data.admin_id ?? authUserKey;
+    // Solo admins pueden crear grupos en nombre de otros usuarios
+    const adminKey =
+      req.user?.role === "admin" && parsed.data.admin_id
+        ? parsed.data.admin_id
+        : authUserKey;
+
     if (!adminKey) return res.status(400).json({ error: "admin_id requerido" });
 
     const participants = new Set([
@@ -252,7 +281,7 @@ async function listMyChats(req, res) {
     const userKey = getAuthUserKey(req);
     if (!userKey)
       return res
-        .status(400)
+        .status(401)
         .json({ error: "No se pudo determinar el usuario autenticado" });
 
     const chats = await listAllChatsByUserKey(userKey);
@@ -263,10 +292,18 @@ async function listMyChats(req, res) {
   }
 }
 
+// Control BOLA / IDOR estricto (HIGH-06, HIGH-07)
 async function listChatsByUser(req, res) {
   try {
     const userKey = String(req.params.userKey);
     if (!userKey) return res.status(400).json({ error: "userKey inválido" });
+
+    const authUserKey = getAuthUserKey(req);
+    if (authUserKey !== userKey && req.user?.role !== "admin") {
+      return res.status(403).json({
+        error: "No tienes autorización para consultar los chats de este usuario",
+      });
+    }
 
     const chats = await listAllChatsByUserKey(userKey);
     return res.json(chats);
@@ -290,6 +327,7 @@ async function getChatByTripId(req, res) {
       where: { is_group: true, chat_type: chatType, trip_id: tripId },
     });
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
+
     const userKey = await requireParticipant(req, res, Number(chat.id));
     if (!userKey) return;
 
@@ -310,6 +348,13 @@ async function disableChatByTripId(req, res) {
     const tripId = String(req.params.tripId);
     if (!tripId) return res.status(400).json({ error: "tripId inválido" });
 
+    const userKey = getAuthUserKey(req);
+    if (!userKey) {
+      return res
+        .status(401)
+        .json({ error: "No se pudo determinar el usuario autenticado" });
+    }
+
     const chatType = req.query.type ?? undefined;
     if (chatType && (!CHAT_TYPES.includes(chatType) || chatType === "DIRECT")) {
       return res.status(400).json({ error: "type inválido" });
@@ -318,16 +363,28 @@ async function disableChatByTripId(req, res) {
     const where = { trip_id: tripId };
     if (chatType) where.chat_type = chatType;
 
-    const result = await prisma.chat.updateMany({
-      where,
-      data: { status: "INACTIVE" },
-    });
-
-    if (result.count === 0) {
+    const existingChats = await prisma.chat.findMany({ where });
+    if (existingChats.length === 0) {
       return res
         .status(404)
         .json({ error: "No se encontraron chats para ese trip_id" });
     }
+
+    // Verificar autorización: debe ser admin del chat o admin de la plataforma
+    const isAllowed =
+      req.user?.role === "admin" ||
+      existingChats.some((c) => String(c.admin_id) === String(userKey));
+
+    if (!isAllowed) {
+      return res.status(403).json({
+        error: "No tienes autorización para desactivar los chats de este viaje",
+      });
+    }
+
+    const result = await prisma.chat.updateMany({
+      where,
+      data: { status: "INACTIVE" },
+    });
 
     return res.json({
       success: true,
@@ -346,7 +403,7 @@ async function listMyGroupChats(req, res) {
     const userKey = getAuthUserKey(req);
     if (!userKey)
       return res
-        .status(400)
+        .status(401)
         .json({ error: "No se pudo determinar el usuario autenticado" });
 
     const chats = await listGroupChatsByUserKey(userKey);
@@ -357,10 +414,18 @@ async function listMyGroupChats(req, res) {
   }
 }
 
+// Control BOLA / IDOR estricto (HIGH-06, HIGH-07)
 async function listGroupChatsByUser(req, res) {
   try {
     const userKey = String(req.params.userKey);
     if (!userKey) return res.status(400).json({ error: "userKey inválido" });
+
+    const authUserKey = getAuthUserKey(req);
+    if (authUserKey !== userKey && req.user?.role !== "admin") {
+      return res.status(403).json({
+        error: "No tienes autorización para consultar los grupos de este usuario",
+      });
+    }
 
     const chats = await listGroupChatsByUserKey(userKey);
     return res.json(chats);
@@ -411,7 +476,9 @@ async function updateGroupChat(req, res) {
     if (parsed.data.name) data.name = parsed.data.name;
     if (parsed.data.chat_type) data.chat_type = parsed.data.chat_type;
     if (parsed.data.trip_id) data.trip_id = parsed.data.trip_id;
-    if (parsed.data.admin_id) data.admin_id = parsed.data.admin_id;
+    if (parsed.data.admin_id && req.user?.role === "admin") {
+      data.admin_id = parsed.data.admin_id;
+    }
 
     await prisma.chat.updateMany({
       where: { id: chatId, is_group: true },
@@ -442,21 +509,18 @@ async function updateChatStatus(req, res) {
     const userKey = getAuthUserKey(req);
     if (!userKey) {
       return res
-        .status(400)
+        .status(401)
         .json({ error: "No se pudo determinar el usuario autenticado" });
     }
 
-    const ok = await isParticipant(chatId, userKey);
-    if (!ok) {
-      return res
-        .status(403)
-        .json({ error: "No eres participante de este chat" });
-    }
+    const isGlobalAdmin = req.user?.role === "admin";
+    const isChatAdmin = chat.is_group && String(chat.admin_id) === String(userKey);
+    const isDirectParticipant = !chat.is_group && (await isParticipant(chatId, userKey));
 
-    if (chat.is_group && String(chat.admin_id) !== String(userKey)) {
-      return res
-        .status(403)
-        .json({ error: "Solo el admin puede cambiar el estado del chat" });
+    if (!isGlobalAdmin && !isChatAdmin && !isDirectParticipant) {
+      return res.status(403).json({
+        error: "Solo el admin o participantes autorizados pueden cambiar el estado del chat",
+      });
     }
 
     const updated = await prisma.chat.update({
@@ -551,8 +615,19 @@ async function removeParticipant(req, res) {
       return res.status(400).json({ error: "Parámetros inválidos" });
     }
 
-    const adminKey = await requireAdmin(req, res, chatId);
-    if (!adminKey) return;
+    const userKey = getAuthUserKey(req);
+    const chat = await prisma.chat.findUnique({ where: { id: chatId } });
+    if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
+
+    const isGlobalAdmin = req.user?.role === "admin";
+    const isChatAdmin = String(chat.admin_id) === String(userKey);
+    const isSelf = String(userKey) === String(userKeyToRemove);
+
+    if (!isGlobalAdmin && !isChatAdmin && !isSelf) {
+      return res.status(403).json({
+        error: "No tienes autorización para eliminar a este participante",
+      });
+    }
 
     await prisma.chatParticipant.deleteMany({
       where: { chat_id: chatId, user_id: userKeyToRemove },
@@ -601,6 +676,16 @@ async function createMessage(req, res) {
     const userKey = await requireParticipant(req, res, chatId);
     if (!userKey) return;
 
+    const chat = await prisma.chat.findUnique({
+      where: { id: chatId },
+      select: { status: true },
+    });
+    if (chat && chat.status === "INACTIVE") {
+      return res.status(400).json({
+        error: "El chat está inactivo y no acepta nuevos mensajes",
+      });
+    }
+
     const parsed = createMessageSchema.safeParse(req.body ?? {});
     if (!parsed.success)
       return res.status(400).json({ error: parsed.error.message });
@@ -616,7 +701,7 @@ async function createMessage(req, res) {
     });
 
     await prisma.chat.updateMany({
-      where: { id: chatId, is_group: true },
+      where: { id: chatId },
       data: {
         last_message_content: parsed.data.content,
         last_message_at: message.created_at,
@@ -661,8 +746,11 @@ async function updateMessage(req, res) {
     if (!msg) return res.status(404).json({ error: "Mensaje no encontrado" });
 
     const chat = await getGroupChatById(chatId);
-    const isAdmin = chat && String(chat.admin_id) === String(userKey);
-    if (!isAdmin && String(msg.sender_id) !== String(userKey)) {
+    const isChatAdmin = chat && String(chat.admin_id) === String(userKey);
+    const isGlobalAdmin = req.user?.role === "admin";
+    const isAuthor = String(msg.sender_id) === String(userKey);
+
+    if (!isAuthor && !isChatAdmin && !isGlobalAdmin) {
       return res.status(403).json({ error: "No puedes editar este mensaje" });
     }
 
@@ -678,7 +766,7 @@ async function updateMessage(req, res) {
     });
     if (last && last.id === messageId) {
       await prisma.chat.updateMany({
-        where: { id: chatId, is_group: true },
+        where: { id: chatId },
         data: {
           last_message_content: parsed.data.content,
           last_message_sender_id: msg.sender_id,
@@ -715,8 +803,11 @@ async function deleteMessage(req, res) {
     if (!msg) return res.status(404).json({ error: "Mensaje no encontrado" });
 
     const chat = await getGroupChatById(chatId);
-    const isAdmin = chat && String(chat.admin_id) === String(userKey);
-    if (!isAdmin && String(msg.sender_id) !== String(userKey)) {
+    const isChatAdmin = chat && String(chat.admin_id) === String(userKey);
+    const isGlobalAdmin = req.user?.role === "admin";
+    const isAuthor = String(msg.sender_id) === String(userKey);
+
+    if (!isAuthor && !isChatAdmin && !isGlobalAdmin) {
       return res.status(403).json({ error: "No puedes eliminar este mensaje" });
     }
 
@@ -751,11 +842,15 @@ async function joinGroupChat(req, res) {
     const userKey = getAuthUserKey(req);
     if (!userKey)
       return res
-        .status(400)
+        .status(401)
         .json({ error: "No se pudo determinar el usuario autenticado" });
 
     const chat = await getGroupChatById(chatId);
     if (!chat) return res.status(404).json({ error: "Chat no encontrado" });
+
+    if (chat.status === "INACTIVE") {
+      return res.status(400).json({ error: "No puedes unirte a un chat inactivo" });
+    }
 
     try {
       await prisma.chatParticipant.create({
@@ -781,7 +876,7 @@ async function leaveGroupChat(req, res) {
     const userKey = getAuthUserKey(req);
     if (!userKey)
       return res
-        .status(400)
+        .status(401)
         .json({ error: "No se pudo determinar el usuario autenticado" });
 
     const chat = await getGroupChatById(chatId);
@@ -827,3 +922,5 @@ export const chatsController = {
   updateMessage,
   deleteMessage,
 };
+
+export default chatsController;
